@@ -39,8 +39,35 @@ function loadData(){
     return JSON.parse(raw);
   }catch(e){ return []; }
 }
-function saveData(arr){
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(arr));
+
+function saveData(arr) {
+  try {
+    // Validate the data before saving
+    if (!Array.isArray(arr)) {
+      console.error("Invalid data format: Expected an array");
+      return false;
+    }
+    
+    // Basic validation for each profile
+    const isValid = arr.every(profile => {
+      return profile && 
+             typeof profile.id === 'string' && 
+             typeof profile.name === 'string' &&
+             typeof profile.age === 'number' &&
+             typeof profile.bloodGroup === 'string';
+    });
+    
+    if (!isValid) {
+      console.error("Invalid profile data structure");
+      return false;
+    }
+    
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(arr));
+    return true;
+  } catch(e) {
+    console.error("Failed to save data:", e);
+    return false;
+  }
 }
 
 /* id generator */
