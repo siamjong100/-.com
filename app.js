@@ -1,519 +1,849 @@
-/* app.js
-   LocalStorage-based Blood Donor Tracker
-   Save as app.js and include in index.html
-*/
-
-/* -----------------------
-   STORAGE KEYS & DEFAULTS
-   ----------------------- */
-const STORAGE_KEY = "blood_donor_app_v1";
-const SETTINGS_KEY = "blood_donor_settings_v1";
-
-const defaultSettings = {
-  donationIntervalDays: 90,
-  locale: "bn",
-  theme: "light"
+// JSONBin.io কনফিগারেশন
+const JSONBIN_API = {
+    BASE_URL: "https://api.jsonbin.io/v3/b",
+    MASTER_KEY: "$2a$10$fnkXj6CO/v2tBDRrr7dL1ujNn3E1Y.y1SY70R49so5rof3sv7ZmUG",
+    BIN_ID: "689c8424ae596e708fc91d40"
 };
 
-/* -----------------------
-   UTILITIES
-   ----------------------- */
-const $ = sel => document.querySelector(sel);
-const $$ = sel => Array.from(document.querySelectorAll(sel));
+// অ্যাপ্লিকেশন স্টেট
+let appState = {
+    donors: [],
+    config: {
+        donationInterval: 90,
+        theme: "light",
+        notificationEnabled: false
+    },
+    currentDonor: null,
+    searchQuery: "",
+    bloodGroupFilter: "",
+    eligibilityFilter: "all"
+};
 
-function loadSettings(){
-  try{
-    const s = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "null");
-    return s ? {...defaultSettings, ...s} : {...defaultSettings};
-  }catch(e){ return {...defaultSettings}; }
-}
-function saveSettings(s){
-  localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
-  applyTheme(s.theme);
+// DOM এলিমেন্টস
+const donorsListEl = document.getElementById('donorsList');
+const donorFormEl = document.getElementById('donorForm');
+const donorModalEl = document.getElementById('donorModal');
+const settingsModalEl = document.getElementById('settingsModal');
+const settingsFormEl = document.getElementById('settingsForm');
+const instantSearchEl = document.getElementById('instantSearch');
+const bloodGroupFilterEl = document.getElementById('bloodGroupFilter');
+const eligibilityFilterEl = document.getElementById('eligibilityFilter');
+const resultsTitleEl = document.getElementById('resultsTitle');
+const resultsCountEl = document.getElementById('resultsCount');
+
+// ইভেন্ট লিসেনার
+document.getElementById('addDonorBtn').addEventListener('click', () => openDonorModal());
+document.getElementById('quickSearchBtn').addEventListener('click', () => instantSearchEl.focus());
+document.getElementById('settingsBtn').addEventListener('click', () => openSettingsModal());
+document.getElementById('helpBtn').addEventListener('click', showHelp);
+document.getElementById('cancelBtn').addEventListener('click', () => closeDonorModal());
+document.querySelectorAll('.close-btn').forEach(btn => btn.addEventListener('click', closeAllModals));
+document.getElementById('addDonationBtn').addEventListener('click', addNewDonation);
+document.getElementById('exportDataBtn').addEventListener('click', exportData);
+document.getElementById('importDataBtn').addEventListener('click', importData);
+document.getElementById('syncDataBtn').addEventListener('click', syncWithCloud);
+instantSearchEl.addEventListener('input', handleInstantSearch);
+bloodGroupFilterEl.addEventListener('change', updateFilters);
+eligibilityFilterEl.addEventListener('change', updateFilters);
+
+// ফর্ম সাবমিশন
+donorFormEl.addEventListener('submit', saveDonor);
+settingsFormEl.addEventListener('submit', saveSettings);
+
+// অ্যাপ্লিকেশন ইনিশিয়ালাইজেশন
+document.addEventListener('DOMContentLoaded', initializeApp);
+
+// ইনিশিয়ালাইজেশন ফাংশন
+function initializeApp() {
+    loadData();
+    applyTheme();
+    renderDonorList();
 }
 
-function loadData(){
-  try{
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if(!raw) return [];
-    return JSON.parse(raw);
-  }catch(e){ return []; }
-}
-
-function saveData(arr) {
-  try {
-    // Validate the data before saving
-    if (!Array.isArray(arr)) {
-      console.error("Invalid data format: Expected an array");
-      return false;
-    }
+// ডেটা লোড ফাংশন
+async function loadData() {
+    showLoading();
     
-    // Basic validation for each profile
-    const isValid = arr.every(profile => {
-      return profile && 
-             typeof profile.id === 'string' && 
-             typeof profile.name === 'string' &&
-             typeof profile.age === 'number' &&
-             typeof profile.bloodGroup === 'string';
-    });
-    
-    if (!isValid) {
-      console.error("Invalid profile data structure");
-      return false;
+    try {
+        // প্রথমে লোকাল স্টোরেজ থেকে চেক করুন
+        const localData = localStorage.getItem('bloodDonorData');
+        if (localData) {
+            const parsedData = JSON.parse(localData);
+            appState.donors = parsedData.donors || [];
+            appState.config = parsedData.config || {
+                donationInterval: 90,
+                theme: "light",
+                notificationEnabled: false
+            };
+            
+            updateUI();
+            applyConfig();
+        }
+        
+        // JSONBin.io থেকে ডেটা সিঙ্ক করুন
+        await syncWithCloud();
+    } catch (error) {
+        console.error("ডেটা লোড করতে সমস্যা:", error);
+        showAlert("error", "ডেটা লোড করতে সমস্যা হয়েছে। ইন্টারনেট কানেকশন চেক করুন।");
+    } finally {
+        hideLoading();
     }
-    
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(arr));
-    return true;
-  } catch(e) {
-    console.error("Failed to save data:", e);
-    return false;
-  }
 }
 
-/* id generator */
-function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,7); }
-
-/* date helpers (YYYY-MM-DD) */
-function toISO(d){
-  if(!d) return null;
-  const dt = new Date(d);
-  if(Number.isNaN(dt.getTime())) return null;
-  const y = dt.getFullYear();
-  const m = String(dt.getMonth()+1).padStart(2,'0');
-  const day = String(dt.getDate()).padStart(2,'0');
-  return `${y}-${m}-${day}`;
-}
-function todayISO(){ return toISO(new Date()); }
-function addDaysISO(isoDate, days){
-  if(!isoDate) return null;
-  const dt = new Date(isoDate + "T00:00:00");
-  dt.setDate(dt.getDate() + Number(days));
-  return toISO(dt);
-}
-function daysBetween(aISO, bISO){
-  // returns b - a in days (integer)
-  const a = new Date(aISO + "T00:00:00");
-  const b = new Date(bISO + "T00:00:00");
-  const diff = b.getTime() - a.getTime();
-  return Math.round(diff / (1000*60*60*24));
-}
-
-/* -----------------------
-   APP STATE
-   ----------------------- */
-let data = loadData();
-let settings = loadSettings();
-
-/* -----------------------
-   UI ELEMENTS
-   ----------------------- */
-const profilesList = $("#profilesList");
-const totalProfiles = $("#totalProfiles");
-const eligibleToday = $("#eligibleToday");
-const upcoming7 = $("#upcoming7");
-
-const searchInput = $("#searchInput");
-const filterGroup = $("#filterGroup");
-const filterEligibility = $("#filterEligibility");
-const btnAdd = $("#btnAdd");
-const btnFastDonate = $("#btnFastDonate");
-
-const modalOverlay = $("#modalOverlay");
-const profileForm = $("#profileForm");
-const modalTitle = $("#modalTitle");
-const btnCancel = $("#btnCancel");
-
-const detailOverlay = $("#detailOverlay");
-const detailContent = $("#detailContent");
-const closeDetail = $("#closeDetail");
-
-const btnExport = $("#btnExport");
-const btnImport = $("#btnImport");
-const importFile = $("#importFile");
-
-const btnSettings = $("#btnSettings");
-const settingsOverlay = $("#settingsOverlay");
-const settingsForm = $("#settingsForm");
-const intervalDaysInput = $("#intervalDays");
-const themeSelect = $("#themeSelect");
-const closeSettings = $("#closeSettings");
-
-/* -----------------------
-   INIT
-   ----------------------- */
-function init(){
-  applyTheme(settings.theme);
-  intervalDaysInput.value = settings.donationIntervalDays;
-  themeSelect.value = settings.theme;
-  render();
-  attachEvents();
-}
-function applyTheme(theme){
-  if(theme === "dark"){
-    document.documentElement.setAttribute("data-theme","dark");
-  }else{
-    document.documentElement.removeAttribute("data-theme");
-  }
-}
-
-/* -----------------------
-   CORE LOGIC
-   ----------------------- */
-function computeNextEligible(profile){
-  // if donations array empty -> return null
-  if(!profile.donations || profile.donations.length === 0) return null;
-  // get latest donation (max)
-  const latest = profile.donations.slice().sort().slice(-1)[0];
-  return addDaysISO(latest, settings.donationIntervalDays);
-}
-
-function statusForNext(nextISO){
-  if(!nextISO) return {status:"noData", text:"আগে দান নেই", cls:"status-red"};
-  const t = todayISO();
-  const daysLeft = daysBetween(t, nextISO);
-  if(daysLeft <= 0) return {status:"eligible", text:"এখনই যোগ্য", cls:"status-green"};
-  if(daysLeft <= 14) return {status:"soon", text:`${daysLeft} দিন বাকি`, cls:"status-amber"};
-  return {status:"notSoon", text:`${daysLeft} দিন বাকি`, cls:"status-red"};
-}
-
-/* -----------------------
-   RENDER
-   ----------------------- */
-function render(){
-  // update dashboard counts
-  totalProfiles.textContent = data.length;
-  const t = todayISO();
-  let eligibleCount = 0, upcomingCount = 0;
-  data.forEach(p => {
-    const next = computeNextEligible(p);
-    if(next){
-      const days = daysBetween(t, next);
-      if(days <= 0) eligibleCount++;
-      if(days <= 7 && days > 0) upcomingCount++;
-    }
-  });
-  eligibleToday.textContent = eligibleCount;
-  upcoming7.textContent = upcomingCount;
-
-  // render profile cards based on filters & search
-  const q = (searchInput.value || "").trim().toLowerCase();
-  const grp = filterGroup.value;
-  const elig = filterEligibility.value;
-
-  let list = data.slice().sort((a,b)=> a.name.localeCompare(b.name));
-
-  list = list.filter(p => {
-    if(q && !p.name.toLowerCase().includes(q)) return false;
-    if(grp !== "all" && p.bloodGroup !== grp) return false;
-    const next = computeNextEligible(p);
-    const daysLeft = next ? daysBetween(todayISO(), next) : null;
-    if(elig === "eligibleToday" && !(daysLeft !== null && daysLeft <= 0)) return false;
-    if(elig === "next7" && !(daysLeft !== null && daysLeft > 0 && daysLeft <= 7)) return false;
-    if(elig === "next30" && !(daysLeft !== null && daysLeft > 0 && daysLeft <= 30)) return false;
-    if(elig === "notEligible" && !(daysLeft !== null && daysLeft > 30)) return false;
-    return true;
-  });
-
-  profilesList.innerHTML = "";
-  if(list.length === 0){
-    profilesList.innerHTML = `<div class="card" style="grid-column:1/-1;text-align:center;color:var(--muted)">কোনো প্রোফাইল পাওয়া যায়নি</div>`;
-    return;
-  }
-
-  list.forEach(p => {
-    const next = computeNextEligible(p);
-    const status = statusForNext(next);
-    const lastDonation = (p.donations && p.donations.length) ? p.donations.slice().sort().slice(-1)[0] : "ন/এ";
-    const card = document.createElement("div");
-    card.className = "profile-card";
-    card.dataset.id = p.id;
-    card.innerHTML = `
-      <div class="avatar" aria-hidden="true">${p.name.split(" ").map(s=>s[0]).slice(0,2).join("")}</div>
-      <div class="p-info">
-        <div class="p-name">${p.name}</div>
-        <div class="p-meta">
-          <div>${p.age} yrs</div>
-          <div class="badge" style="background:#111;color:#fff">${p.bloodGroup}</div>
-          <div style="margin-left:auto" title="পরবর্তী যোগ্যতা"><span class="${status.cls} badge">${status.text}</span></div>
-        </div>
-        <div class="p-meta" style="margin-top:6px;color:var(--muted);font-size:13px">সর্বশেষ: ${lastDonation}${p.phone? ' • ' + p.phone : ''}</div>
-      </div>
-    `;
-    card.addEventListener("click", () => openDetail(p.id));
-    profilesList.appendChild(card);
-  });
-}
-
-/* -----------------------
-   CRUD
-   ----------------------- */
-function openAddModal(){
-  modalTitle.textContent = "নতুন প্রোফাইল";
-  profileForm.reset();
-  profileForm.id.value = "";
-  modalOverlay.classList.remove("hidden");
-  profileForm.name.focus();
-}
-function closeModal(){ modalOverlay.classList.add("hidden"); }
-
-function upsertProfile(formData){
-  const id = formData.get("id");
-  const obj = {
-    id: id || uid(),
-    name: formData.get("name").trim(),
-    age: Number(formData.get("age") || 0),
-    bloodGroup: formData.get("bloodGroup"),
-    phone: formData.get("phone") || "",
-    donations: [],
-    notes: formData.get("notes") || ""
-  };
-  const recent = formData.get("recentDonation");
-  if(recent) obj.donations = [toISO(recent)];
-
-  if(id){
-    // update
-    data = data.map(d => d.id === id ? {...d, ...obj, donations: d.donations.concat(obj.donations).filter(Boolean)} : d);
-  }else{
-    data.push(obj);
-  }
-  saveData(data);
-  render();
-}
-
-/* -----------------------
-   Detail view
-   ----------------------- */
-function openDetail(id){
-  const p = data.find(x=>x.id===id);
-  if(!p) return;
-  const next = computeNextEligible(p);
-  const status = statusForNext(next);
-  detailContent.innerHTML = `
-    <h3>${p.name} <span style="font-size:14px;color:var(--muted)">• ${p.bloodGroup}</span></h3>
-    <div style="margin-top:6px;color:var(--muted)">বয়স: ${p.age} ${p.phone? ' • ফোন: '+p.phone : ''}</div>
-    <div style="margin-top:8px;"><strong>পরবর্তী যোগ্যতা:</strong> ${ next || "নির্ধারিত নেই" } <span class="${status.cls} badge" style="margin-left:8px">${status.text}</span></div>
-    <div style="margin-top:12px;"><strong>নোটস:</strong><div style="padding:8px;background:var(--card);border-radius:8px;margin-top:6px">${p.notes || "কোনো নোট নেই"}</div></div>
-
-    <div style="margin-top:12px"><strong>ডোনেশন ইতিহাস</strong>
-      <ul id="donList" style="margin-top:8px;padding-left:18px"></ul>
-    </div>
-
-    <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
-      <button id="addDonationBtn" class="primary">নতুন ডোনেশন যোগ করুন</button>
-      <button id="deleteProfileBtn">প্রোফাইল মুছুন</button>
-      <button id="editProfileBtn">এডিট</button>
-    </div>
-  `;
-  // fill donations
-  const donList = $("#donList");
-  if(p.donations && p.donations.length){
-    p.donations.slice().sort().reverse().forEach(d=>{
-      const li = document.createElement("li");
-      li.textContent = d;
-      const rm = document.createElement("button");
-      rm.textContent = "মুছুন";
-      rm.style.marginLeft = "8px";
-      rm.addEventListener("click", (e) => {
-        e.stopPropagation();
-        if(!confirm("এই ডোনেশন রেকর্ড মুছে ফেলতে চান?")) return;
-        p.donations = p.donations.filter(x=> x !== d);
-        saveData(data);
-        openDetail(id);
-        render();
-      });
-      li.appendChild(rm);
-      donList.appendChild(li);
-    });
-  } else {
-    donList.innerHTML = "<li style='color:var(--muted)'>কোনো রেকর্ড নেই</li>";
-  }
-
-  // attach buttons
-  $("#addDonationBtn").addEventListener("click", ()=> {
-    const dt = prompt("ডোনেশনের তারিখ (YYYY-MM-DD) লিখুন — উদাহরণ: 2025-08-12", todayISO());
-    if(!dt) return;
-    const iso = toISO(dt);
-    if(!iso){ alert("তারিখ সঠিক নয়।"); return; }
-    p.donations = (p.donations || []).concat([iso]);
-    saveData(data);
-    openDetail(id);
-    render();
-  });
-
-  $("#deleteProfileBtn").addEventListener("click", ()=> {
-    if(!confirm("এই প্রোফাইল সম্পূর্ণভাবে মুছে যাবে। আপনি কি নিশ্চিত?")) return;
-    data = data.filter(x=> x.id !== id);
-    saveData(data);
-    closeDetailFn();
-    render();
-  });
-
-  $("#editProfileBtn").addEventListener("click", ()=> {
-    // open edit modal
-    openAddModal();
-    modalTitle.textContent = "প্রোফাইল এডিট";
-    profileForm.id.value = p.id;
-    profileForm.name.value = p.name;
-    profileForm.age.value = p.age;
-    profileForm.bloodGroup.value = p.bloodGroup;
-    profileForm.phone.value = p.phone || "";
-    profileForm.notes.value = p.notes || "";
-    // recentDonation leave blank
-    closeDetailFn();
-  });
-
-  detailOverlay.classList.remove("hidden");
-}
-function closeDetailFn(){ detailOverlay.classList.add("hidden"); detailContent.innerHTML = ""; }
-
-/* -----------------------
-   EXPORT / IMPORT
-   ----------------------- */
-function exportJSON(){
-  const blob = new Blob([JSON.stringify({settings, data}, null, 2)], {type:"application/json"});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url; a.download = `donors_backup_${todayISO()}.json`;
-  a.click();
-  URL.revokeObjectURL(url);
-}
-function exportCSV(){
-  // produce CSV rows: id,name,age,bloodGroup,phone,notes,donations(semi-colon)
-  const header = ["id","name","age","bloodGroup","phone","notes","donations"].join(",");
-  const rows = data.map(p => {
-    const line = [
-      `"${p.id}"`,
-      `"${p.name.replace(/"/g,'""')}"`,
-      p.age,
-      p.bloodGroup,
-      `"${(p.phone||"").replace(/"/g,'""')}"`,
-      `"${(p.notes||"").replace(/"/g,'""')}"`,
-      `"${(p.donations||[]).join(";")}"`,
-    ];
-    return line.join(",");
-  });
-  const csv = [header].concat(rows).join("\n");
-  const blob = new Blob([csv], {type:"text/csv"});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url; a.download = `donors_${todayISO()}.csv`;
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
-function handleImportFile(file){
-  const reader = new FileReader();
-  reader.onload = e => {
-    try{
-      const obj = JSON.parse(e.target.result);
-      if(Array.isArray(obj.data)){
-        // merge carefully: avoid id collisions
-        const existingIds = new Set(data.map(d=>d.id));
-        const toAdd = obj.data.map(d => {
-          if(!d.id || existingIds.has(d.id)) d.id = uid();
-          // ensure fields
-          return {
-            id:d.id,
-            name:d.name||"অজানা",
-            age:Number(d.age||0),
-            bloodGroup:d.bloodGroup||"O+",
-            phone:d.phone||"",
-            donations:Array.isArray(d.donations)?d.donations.map(toISO).filter(Boolean):[],
-            notes:d.notes||""
-          };
+// ক্লাউডে ডেটা সিঙ্ক করুন
+async function syncWithCloud() {
+    try {
+        const response = await fetch(`${JSONBIN_API.BASE_URL}/${JSONBIN_API.BIN_ID}/latest`, {
+            headers: {
+                "X-Master-Key": JSONBIN_API.MASTER_KEY,
+                "X-Bin-Meta": false
+            }
         });
-        data = data.concat(toAdd);
-        saveData(data);
-        if(obj.settings) settings = {...settings, ...obj.settings}, saveSettings(settings);
-        alert("Import সফল: নতুন প্রোফাইল যোগ করা হয়েছে");
-        render();
-      } else {
-        alert("ফাইলটি প্রত্যাশিত ফরম্যাটে নেই।")
-      }
-    }catch(err){
-      alert("Import ব্যর্থ: ফাইলটি সঠিক JSON নয়।");
+        
+        if (!response.ok) throw new Error('ডেটা লোড করতে ব্যর্থ');
+        
+        const cloudData = await response.json();
+        
+        if (cloudData) {
+            // লোকাল ডেটার সাথে ক্লাউড ডেটা মার্জ করুন
+            const mergedDonors = mergeDonors(appState.donors, cloudData.donors || []);
+            
+            appState.donors = mergedDonors;
+            appState.config = cloudData.config || appState.config;
+            
+            saveDataToLocal();
+            updateUI();
+            applyConfig();
+            
+            showAlert("success", "ডেটা সফলভাবে সিঙ্ক করা হয়েছে");
+        }
+    } catch (error) {
+        console.error("ক্লাউড সিঙ্ক করতে সমস্যা:", error);
+        showAlert("warning", "ক্লাউডে সিঙ্ক করতে সমস্যা হয়েছে। লোকাল ডেটা ব্যবহার করা হচ্ছে।");
     }
-  };
-  reader.readAsText(file);
 }
 
-/* -----------------------
-   EVENTS
-   ----------------------- */
-function attachEvents(){
-  btnAdd.addEventListener("click", openAddModal);
-  btnCancel.addEventListener("click", closeModal);
-  modalOverlay.addEventListener("click", (e)=>{
-    if(e.target === modalOverlay) closeModal();
-  });
-
-  profileForm.addEventListener("submit", (ev)=>{
-    ev.preventDefault();
-    const fd = new FormData(profileForm);
-    upsertProfile(fd);
-    closeModal();
-  });
-
-  searchInput.addEventListener("input", render);
-  filterGroup.addEventListener("change", render);
-  filterEligibility.addEventListener("change", render);
-
-  btnFastDonate.addEventListener("click", ()=>{
-    // quick add donation for a selected profile (if only one in search)
-    const q = (searchInput.value||"").trim();
-    if(!q){
-      alert("দয়া করে প্রথমে সার্চ করে প্রোফাইল সিলেক্ট করুন অথবা প্রোফাইল লিস্ট থেকে খুলুন।");
-      return;
-    }
-    const matches = data.filter(p => p.name.toLowerCase().includes(q.toLowerCase()));
-    if(matches.length === 0){ alert("কোনো মিল পাওয়া যায়নি।"); return; }
-    if(matches.length > 1){
-      alert("একাধিক মিল পাওয়া গেছে — অনুগ্রহ করে প্রোফাইল লিস্ট থেকে সিলেক্ট করে 'আজ দান' যুক্ত করুন।");
-      return;
-    }
-    const p = matches[0];
-    p.donations = (p.donations||[]).concat([todayISO()]);
-    saveData(data);
-    render();
-    alert(`${p.name} — আজকের তারিখ যোগ করা হলো।`);
-  });
-
-  // Detail overlay close
-  closeDetail.addEventListener("click", closeDetailFn);
-  detailOverlay.addEventListener("click", (e)=> { if(e.target === detailOverlay) closeDetailFn(); });
-
-  // export/import
-  btnExport.addEventListener("click", ()=>{
-    const ok = confirm("Export করা হলে JSON ও CSV দুটো ডাউনলোড করা হবে — চালিয়ে যাবেন?");
-    if(!ok) return;
-    exportJSON();
-    exportCSV();
-  });
-  btnImport.addEventListener("click", ()=> importFile.click());
-  importFile.addEventListener("change", (e)=>{
-    const f = e.target.files[0];
-    if(!f) return;
-    handleImportFile(f);
-    importFile.value = "";
-  });
-
-  // settings
-  btnSettings.addEventListener("click", ()=> settingsOverlay.classList.remove("hidden"));
-  closeSettings.addEventListener("click", ()=> settingsOverlay.classList.add("hidden"));
-  settingsForm.addEventListener("submit", (ev)=>{
-    ev.preventDefault();
-    const d = Number(intervalDaysInput.value) || 90;
-    settings.donationIntervalDays = d;
-    settings.theme = themeSelect.value || "light";
-    saveSettings(settings);
-    settingsOverlay.classList.add("hidden");
-    render();
-  });
+// ডোনার ডেটা মার্জ করুন
+function mergeDonors(localDonors, cloudDonors) {
+    const merged = [...localDonors];
+    const localIds = new Set(localDonors.map(d => d.id));
+    
+    cloudDonors.forEach(cloudDonor => {
+        if (!localIds.has(cloudDonor.id)) {
+            merged.push(cloudDonor);
+        } else {
+            // একই আইডি থাকলে লোকাল ডেটাকে প্রাধান্য দিন
+            const existingIndex = merged.findIndex(d => d.id === cloudDonor.id);
+            if (existingIndex !== -1) {
+                // শুধুমাত্র নতুন ডোনেশন যোগ করুন
+                const newDonations = cloudDonor.donations.filter(d => 
+                    !merged[existingIndex].donations.includes(d)
+                );
+                merged[existingIndex].donations = [
+                    ...merged[existingIndex].donations,
+                    ...newDonations
+                ].sort((a, b) => new Date(b) - new Date(a));
+            }
+        }
+    });
+    
+    return merged;
 }
 
-/* -----------------------
-   Kickoff
-   ----------------------- */
-init();
+// ডেটা সেভ ফাংশন
+function saveDataToLocal() {
+    const dataToSave = {
+        donors: appState.donors,
+        config: appState.config
+    };
+    
+    localStorage.setItem('bloodDonorData', JSON.stringify(dataToSave));
+}
 
-/* End of app.js */
+async function saveDataToCloud() {
+    const dataToSave = {
+        donors: appState.donors,
+        config: appState.config
+    };
+    
+    try {
+        const response = await fetch(`${JSONBIN_API.BASE_URL}/${JSONBIN_API.BIN_ID}`, {
+            method: "PUT",
+            headers: {
+                "Content-Type": "application/json",
+                "X-Master-Key": JSONBIN_API.MASTER_KEY
+            },
+            body: JSON.stringify(dataToSave)
+        });
+        
+        if (!response.ok) throw new Error('ডেটা সেভ করতে ব্যর্থ');
+        return true;
+    } catch (error) {
+        console.error("ডেটা সেভ করতে সমস্যা:", error);
+        return false;
+    }
+}
+
+// UI আপডেট ফাংশন
+function updateUI() {
+    renderDonorList();
+    updateDashboardStats();
+}
+
+// ডোনার লিস্ট রেন্ডার
+function renderDonorList() {
+    const filteredDonors = filterDonors();
+    
+    donorsListEl.innerHTML = '';
+    
+    if (filteredDonors.length === 0) {
+        showNoResults();
+        return;
+    }
+    
+    filteredDonors.forEach(donor => {
+        const donorCard = createDonorCard(donor);
+        donorsListEl.appendChild(donorCard);
+    });
+    
+    updateResultsInfo(filteredDonors.length);
+}
+
+// ফিল্টার ডোনার
+function filterDonors() {
+    const searchQuery = appState.searchQuery.toLowerCase();
+    const bloodGroup = appState.bloodGroupFilter;
+    const eligibility = appState.eligibilityFilter;
+    const today = new Date();
+    
+    return appState.donors.filter(donor => {
+        // সার্চ কুয়েরি ম্যাচ
+        const nameMatch = donor.name.toLowerCase().includes(searchQuery);
+        const phoneMatch = donor.phone.includes(searchQuery);
+        const bloodMatch = donor.bloodGroup.toLowerCase().includes(searchQuery);
+        const searchMatch = nameMatch || phoneMatch || bloodMatch;
+        
+        // রক্তের গ্রুপ ম্যাচ
+        const bloodGroupMatch = bloodGroup === '' || donor.bloodGroup === bloodGroup;
+        
+        // এলিজিবিলিটি ম্যাচ
+        let eligibilityMatch = true;
+        if (eligibility !== 'all') {
+            const lastDonation = donor.donations && donor.donations.length > 0 ? 
+                new Date(donor.donations[donor.donations.length - 1]) : new Date(0);
+            
+            const nextEligibleDate = new Date(lastDonation);
+            nextEligibleDate.setDate(nextEligibleDate.getDate() + appState.config.donationInterval);
+            
+            if (eligibility === 'eligible') {
+                eligibilityMatch = nextEligibleDate <= today;
+            } else if (eligibility === 'soon') {
+                const nextWeek = new Date();
+                nextWeek.setDate(nextWeek.getDate() + 7);
+                eligibilityMatch = nextEligibleDate > today && nextEligibleDate <= nextWeek;
+            }
+        }
+        
+        return searchMatch && bloodGroupMatch && eligibilityMatch;
+    });
+}
+
+// ডোনার কার্ড তৈরি করুন
+function createDonorCard(donor) {
+    const lastDonation = donor.donations && donor.donations.length > 0 ? 
+        new Date(donor.donations[donor.donations.length - 1]) : new Date(0);
+    
+    const nextEligibleDate = new Date(lastDonation);
+    nextEligibleDate.setDate(nextEligibleDate.getDate() + appState.config.donationInterval);
+    
+    const today = new Date();
+    const daysUntilEligible = Math.ceil((nextEligibleDate - today) / (1000 * 60 * 60 * 24));
+    
+    let eligibilityClass, eligibilityText;
+    
+    if (daysUntilEligible <= 0) {
+        eligibilityClass = 'eligible';
+        eligibilityText = 'আজ রক্তদানে উপযুক্ত';
+    } else if (daysUntilEligible <= 7) {
+        eligibilityClass = 'soon';
+        eligibilityText = `${daysUntilEligible} দিন পর উপযুক্ত`;
+    } else {
+        eligibilityClass = 'not-eligible';
+        eligibilityText = `${daysUntilEligible} দিন পর উপযুক্ত`;
+    }
+    
+    const donorCard = document.createElement('div');
+    donorCard.className = 'donor-card';
+    donorCard.innerHTML = `
+        <div class="donor-header">
+            <div>
+                <div class="donor-name">${donor.name}</div>
+                <div class="donor-id">${donor.id}</div>
+            </div>
+            <span class="donor-blood">${donor.bloodGroup}</span>
+        </div>
+        
+        <div class="donor-info">
+            <p><i class="fas fa-phone"></i> ${donor.phone}</p>
+            <p><i class="fas fa-map-marker-alt"></i> ${donor.location}</p>
+            <p><i class="fas fa-calendar-day"></i> সর্বশেষ দান: ${formatDate(lastDonation)}</p>
+            <p><i class="fas fa-calendar-check"></i> পরবর্তী দান: ${formatDate(nextEligibleDate)}</p>
+        </div>
+        
+        <div class="donor-eligibility">
+            <span class="eligibility-badge ${eligibilityClass}">${eligibilityText}</span>
+        </div>
+        
+        <div class="donor-actions">
+            <button class="contact-btn" data-phone="${donor.phone}">
+                <i class="fas fa-phone"></i> কল করুন
+            </button>
+            <button class="details-btn" data-id="${donor.id}">
+                <i class="fas fa-info-circle"></i> বিস্তারিত
+            </button>
+        </div>
+    `;
+    
+    // যোগাযোগ বাটনে ইভেন্ট যোগ করুন
+    donorCard.querySelector('.contact-btn').addEventListener('click', (e) => {
+        e.stopPropagation();
+        const phone = e.currentTarget.getAttribute('data-phone');
+        if (confirm(`${donor.name} (${donor.bloodGroup}) কে ${phone} নম্বরে কল করতে চান?`)) {
+            window.open(`tel:${phone}`);
+        }
+    });
+    
+    // বিস্তারিত বাটনে ইভেন্ট যোগ করুন
+    donorCard.querySelector('.details-btn').addEventListener('click', (e) => {
+        e.stopPropagation();
+        const donorId = e.currentTarget.getAttribute('data-id');
+        const donor = appState.donors.find(d => d.id === donorId);
+        if (donor) openDonorModal(donor);
+    });
+    
+    // সম্পূর্ণ কার্ডে ক্লিক ইভেন্ট
+    donorCard.addEventListener('click', () => {
+        showDonorDetails(donor);
+    });
+    
+    return donorCard;
+}
+
+// ডোনার বিস্তারিত দেখান
+function showDonorDetails(donor) {
+    const lastDonation = donor.donations && donor.donations.length > 0 ? 
+        new Date(donor.donations[donor.donations.length - 1]) : new Date(0);
+    
+    const nextEligibleDate = new Date(lastDonation);
+    nextEligibleDate.setDate(nextEligibleDate.getDate() + appState.config.donationInterval);
+    
+    const today = new Date();
+    const daysUntilEligible = Math.ceil((nextEligibleDate - today) / (1000 * 60 * 60 * 24));
+    
+    let eligibilityText;
+    if (daysUntilEligible <= 0) {
+        eligibilityText = 'এই ডোনার আজই রক্তদান করতে পারেন';
+    } else {
+        eligibilityText = `এই ডোনার ${daysUntilEligible} দিন পর রক্তদান করতে পারবেন`;
+    }
+    
+    const detailMessage = `
+        <strong>নাম:</strong> ${donor.name}<br>
+        <strong>রক্তের গ্রুপ:</strong> ${donor.bloodGroup}<br>
+        <strong>ফোন:</strong> ${donor.phone}<br>
+        <strong>অবস্থান:</strong> ${donor.location}<br>
+        <strong>সর্বশেষ রক্তদান:</strong> ${formatDate(lastDonation)}<br>
+        <strong>পরবর্তী রক্তদানের তারিখ:</strong> ${formatDate(nextEligibleDate)}<br><br>
+        <strong>স্ট্যাটাস:</strong> ${eligibilityText}
+    `;
+    
+    showAlert("info", detailMessage, donor.name + " - ডোনার বিস্তারিত");
+}
+
+// রেজাল্ট ইনফো আপডেট করুন
+function updateResultsInfo(count) {
+    resultsCountEl.textContent = `${count} জন পাওয়া গেছে`;
+    
+    let titleText = "উপযুক্ত রক্তদাতাদের তালিকা";
+    if (appState.searchQuery) {
+        titleText = `"${appState.searchQuery}" এর ফলাফল`;
+    } else if (appState.bloodGroupFilter) {
+        titleText = `${appState.bloodGroupFilter} গ্রুপের ডোনার`;
+    }
+    
+    if (appState.eligibilityFilter === 'eligible') {
+        titleText += " (আজ উপযুক্ত)";
+    } else if (appState.eligibilityFilter === 'soon') {
+        titleText += " (৭ দিনে উপযুক্ত)";
+    }
+    
+    resultsTitleEl.textContent = titleText;
+}
+
+// কোনো রেজাল্ট না পাওয়া গেলে
+function showNoResults() {
+    donorsListEl.innerHTML = `
+        <div class="empty-state">
+            <i class="fas fa-user-friends"></i>
+            <p>কোনো ডোনার পাওয়া যায়নি। অনুগ্রহ করে সার্চ ক্রাইটেরিয়া পরিবর্তন করুন।</p>
+            <button class="primary-btn" id="addNewDonorBtn">
+                <i class="fas fa-user-plus"></i> নতুন ডোনার যোগ করুন
+            </button>
+        </div>
+    `;
+    
+    document.getElementById('addNewDonorBtn').addEventListener('click', () => openDonorModal());
+}
+
+// ড্যাশবোর্ড স্ট্যাটস আপডেট
+function updateDashboardStats() {
+    const today = new Date();
+    const nextWeek = new Date();
+    nextWeek.setDate(nextWeek.getDate() + 7);
+    
+    const eligibleDonors = appState.donors.filter(donor => {
+        if (!donor.donations || donor.donations.length === 0) return true;
+        
+        const lastDonation = new Date(donor.donations[donor.donations.length - 1]);
+        const nextEligibleDate = new Date(lastDonation);
+        nextEligibleDate.setDate(nextEligibleDate.getDate() + appState.config.donationInterval);
+        
+        return nextEligibleDate <= today;
+    });
+    
+    const upcomingDonors = appState.donors.filter(donor => {
+        if (!donor.donations || donor.donations.length === 0) return false;
+        
+        const lastDonation = new Date(donor.donations[donor.donations.length - 1]);
+        const nextEligibleDate = new Date(lastDonation);
+        nextEligibleDate.setDate(nextEligibleDate.getDate() + appState.config.donationInterval);
+        
+        return nextEligibleDate > today && nextEligibleDate <= nextWeek;
+    });
+    
+    document.getElementById('totalDonors').textContent = appState.donors.length;
+    document.getElementById('eligibleToday').textContent = eligibleDonors.length;
+    document.getElementById('upcomingEligible').textContent = upcomingDonors.length;
+}
+
+// ইনস্ট্যান্ট সার্চ হ্যান্ডলার
+function handleInstantSearch(e) {
+    appState.searchQuery = e.target.value;
+    renderDonorList();
+}
+
+// ফিল্টার আপডেট
+function updateFilters() {
+    appState.bloodGroupFilter = bloodGroupFilterEl.value;
+    appState.eligibilityFilter = eligibilityFilterEl.value;
+    renderDonorList();
+}
+
+// ডোনার মোডাল ওপেন
+function openDonorModal(donor = null) {
+    appState.currentDonor = donor;
+    
+    if (donor) {
+        document.getElementById('modalTitle').innerHTML = `<i class="fas fa-user-edit"></i> ${donor.name} - প্রোফাইল`;
+        document.getElementById('donorId').value = donor.id;
+        document.getElementById('name').value = donor.name || '';
+        document.getElementById('age').value = donor.age || '';
+        document.getElementById('bloodGroup').value = donor.bloodGroup || '';
+        document.getElementById('phone').value = donor.phone || '';
+        document.getElementById('location').value = donor.location || '';
+        document.getElementById('notes').value = donor.notes || '';
+        
+        const lastDonation = donor.donations && donor.donations.length > 0 ? 
+            donor.donations[donor.donations.length - 1] : new Date().toISOString().split('T')[0];
+        
+        document.getElementById('lastDonation').value = lastDonation;
+        renderDonationHistory(donor.donations || []);
+        document.getElementById('donationHistory').style.display = 'block';
+    } else {
+        document.getElementById('modalTitle').innerHTML = '<i class="fas fa-user-plus"></i> নতুন ডোনার যোগ করুন';
+        donorFormEl.reset();
+        document.getElementById('donorId').value = generateDonorId();
+        document.getElementById('lastDonation').value = new Date().toISOString().split('T')[0];
+        document.getElementById('donationHistory').style.display = 'none';
+    }
+    
+    donorModalEl.style.display = 'block';
+}
+
+// ডোনার আইডি জেনারেট করুন
+function generateDonorId() {
+    const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    const numbers = '0123456789';
+    let id = 'DNR-';
+    
+    // 3 random letters
+    for (let i = 0; i < 3; i++) {
+        id += letters.charAt(Math.floor(Math.random() * letters.length));
+    }
+    
+    // 4 random numbers
+    for (let i = 0; i < 4; i++) {
+        id += numbers.charAt(Math.floor(Math.random() * numbers.length));
+    }
+    
+    return id;
+}
+
+// ডোনার সেভ
+async function saveDonor(e) {
+    e.preventDefault();
+    showLoading();
+    
+    const donorData = {
+        id: document.getElementById('donorId').value,
+        name: document.getElementById('name').value,
+        age: parseInt(document.getElementById('age').value),
+        bloodGroup: document.getElementById('bloodGroup').value,
+        phone: document.getElementById('phone').value,
+        location: document.getElementById('location').value,
+        notes: document.getElementById('notes').value,
+        donations: [],
+        createdAt: new Date().toISOString()
+    };
+    
+    const lastDonation = document.getElementById('lastDonation').value;
+    if (lastDonation) donorData.donations.push(lastDonation);
+    
+    try {
+        if (appState.currentDonor) {
+            // Update existing donor
+            donorData.donations = [...appState.currentDonor.donations];
+            if (lastDonation !== appState.currentDonor.donations[appState.currentDonor.donations.length - 1]) {
+                donorData.donations[donorData.donations.length - 1] = lastDonation;
+            }
+            
+            const index = appState.donors.findIndex(d => d.id === appState.currentDonor.id);
+            if (index !== -1) appState.donors[index] = donorData;
+        } else {
+            // Add new donor
+            appState.donors.push(donorData);
+        }
+        
+        // লোকাল এবং ক্লাউডে সেভ করুন
+        saveDataToLocal();
+        const cloudSaved = await saveDataToCloud();
+        
+        updateUI();
+        closeDonorModal();
+        
+        showAlert("success", `ডোনার প্রোফাইল সফলভাবে ${appState.currentDonor ? 'আপডেট' : 'যোগ'} করা হয়েছে`);
+        
+        if (!cloudSaved) {
+            showAlert("warning", "ডেটা ক্লাউডে সেভ করতে সমস্যা হয়েছে, শুধুমাত্র লোকালে সেভ করা হয়েছে");
+        }
+    } catch (error) {
+        console.error("ডোনার সেভ করতে সমস্যা:", error);
+        showAlert("error", "ডোনার সেভ করতে সমস্যা হয়েছে");
+    } finally {
+        hideLoading();
+    }
+}
+
+// নতুন রক্তদান যোগ করুন
+async function addNewDonation() {
+    const donationDate = prompt("রক্তদানের তারিখ ইনপুট করুন (YYYY-MM-DD):", new Date().toISOString().split('T')[0]);
+    
+    if (donationDate) {
+        showLoading();
+        
+        try {
+            if (!appState.currentDonor.donations) {
+                appState.currentDonor.donations = [];
+            }
+            
+            appState.currentDonor.donations.push(donationDate);
+            appState.currentDonor.donations.sort((a, b) => new Date(b) - new Date(a));
+            
+            // লোকাল এবং ক্লাউডে সেভ করুন
+            saveDataToLocal();
+            const cloudSaved = await saveDataToCloud();
+            
+            renderDonationHistory(appState.currentDonor.donations);
+            updateUI();
+            
+            showAlert("success", "রক্তদানের তথ্য সফলভাবে যোগ করা হয়েছে");
+            
+            if (!cloudSaved) {
+                showAlert("warning", "ডেটা ক্লাউডে সেভ করতে সমস্যা হয়েছে, শুধুমাত্র লোকালে সেভ করা হয়েছে");
+            }
+        } catch (error) {
+            console.error("রক্তদান যোগ করতে সমস্যা:", error);
+            showAlert("error", "রক্তদান যোগ করতে সমস্যা হয়েছে");
+        } finally {
+            hideLoading();
+        }
+    }
+}
+
+// রক্তদানের ইতিহাস রেন্ডার
+function renderDonationHistory(donations = []) {
+    const historyListEl = document.getElementById('historyList');
+    historyListEl.innerHTML = '';
+    
+    if (donations.length === 0) {
+        historyListEl.innerHTML = '<li class="no-history">কোনো রক্তদানের রেকর্ড নেই</li>';
+        return;
+    }
+    
+    // তারিখ অনুযায়ী সর্ট করুন (নতুন থেকে পুরানো)
+    const sortedDonations = [...donations].sort((a, b) => new Date(b) - new Date(a));
+    
+    sortedDonations.forEach(date => {
+        const li = document.createElement('li');
+        li.textContent = formatDate(new Date(date));
+        historyListEl.appendChild(li);
+    });
+}
+
+// সেটিংস মোডাল ওপেন
+function openSettingsModal() {
+    document.getElementById('donationInterval').value = appState.config.donationInterval;
+    document.querySelector(`input[name="theme"][value="${appState.config.theme}"]`).checked = true;
+    settingsModalEl.style.display = 'block';
+}
+
+// সেটিংস সেভ
+async function saveSettings(e) {
+    e.preventDefault();
+    showLoading();
+    
+    try {
+        appState.config = {
+            donationInterval: parseInt(document.getElementById('donationInterval').value),
+            theme: document.querySelector('input[name="theme"]:checked').value,
+            notificationEnabled: appState.config.notificationEnabled
+        };
+        
+        // লোকাল এবং ক্লাউডে সেভ করুন
+        saveDataToLocal();
+        const cloudSaved = await saveDataToCloud();
+        
+        applyConfig();
+        closeSettingsModal();
+        
+        showAlert("success", "সেটিংস সফলভাবে আপডেট করা হয়েছে");
+        
+        if (!cloudSaved) {
+            showAlert("warning", "সেটিংস ক্লাউডে সেভ করতে সমস্যা হয়েছে, শুধুমাত্র লোকালে সেভ করা হয়েছে");
+        }
+    } catch (error) {
+        console.error("সেটিংস সেভ করতে সমস্যা:", error);
+        showAlert("error", "সেটিংস সেভ করতে সমস্যা হয়েছে");
+    } finally {
+        hideLoading();
+    }
+}
+
+// কনফিগ অ্যাপ্লাই
+function applyConfig() {
+    applyTheme();
+    renderDonorList();
+}
+
+// থিম অ্যাপ্লাই
+function applyTheme() {
+    if (appState.config.theme === 'dark') {
+        document.body.classList.add('dark-theme');
+    } else {
+        document.body.classList.remove('dark-theme');
+    }
+}
+
+// ডেটা এক্সপোর্ট
+function exportData() {
+    const data = {
+        donors: appState.donors,
+        config: appState.config
+    };
+    
+    const dataStr = JSON.stringify(data, null, 2);
+    const dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
+    
+    const exportFileDefaultName = `blood-donor-data-${new Date().toISOString().split('T')[0]}.json`;
+    
+    const linkElement = document.createElement('a');
+    linkElement.setAttribute('href', dataUri);
+    linkElement.setAttribute('download', exportFileDefaultName);
+    linkElement.click();
+}
+
+// ডেটা ইম্পোর্ট
+function importData() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.json';
+    
+    input.onchange = async e => {
+        const file = e.target.files[0];
+        const reader = new FileReader();
+        
+        reader.onload = async event => {
+            showLoading();
+            
+            try {
+                const importedData = JSON.parse(event.target.result);
+                
+                if (!importedData.donors || !Array.isArray(importedData.donors)) {
+                    throw new Error("অবৈধ ডেটা ফরম্যাট");
+                }
+                
+                if (confirm(`আপনি কি ${importedData.donors.length} ডোনারের ডেটা ইম্পোর্ট করতে চান?`)) {
+                    appState.donors = importedData.donors || [];
+                    appState.config = importedData.config || {
+                        donationInterval: 90,
+                        theme: "light",
+                        notificationEnabled: false
+                    };
+                    
+                    // লোকাল এবং ক্লাউডে সেভ করুন
+                    saveDataToLocal();
+                    const cloudSaved = await saveDataToCloud();
+                    
+                    updateUI();
+                    applyConfig();
+                    
+                    showAlert("success", "ডেটা সফলভাবে ইম্পোর্ট করা হয়েছে");
+                    
+                    if (!cloudSaved) {
+                        showAlert("warning", "ডেটা ক্লাউডে সেভ করতে সমস্যা হয়েছে, শুধুমাত্র লোকালে সেভ করা হয়েছে");
+                    }
+                }
+            } catch (error) {
+                console.error("ডেটা ইম্পোর্ট করতে সমস্যা:", error);
+                showAlert("error", "ডেটা ইম্পোর্ট করতে সমস্যা হয়েছে। ফাইলটি সঠিক ফরম্যাটে নেই।");
+            } finally {
+                hideLoading();
+            }
+        };
+        
+        reader.readAsText(file);
+    };
+    
+    input.click();
+}
+
+// সাহায্য দেখান
+function showHelp() {
+    const helpMessage = `
+        <strong>রক্তদাতা নেটওয়ার্ক ব্যবহার নির্দেশিকা</strong><br><br>
+        
+        <strong>১. নতুন ডোনার যোগ:</strong><br>
+        - "ডোনার যোগ করুন" বাটনে ক্লিক করুন<br>
+        - ফর্মটি পূরণ করুন এবং সেভ করুন<br><br>
+        
+        <strong>২. রক্তদাতা খুঁজুন:</strong><br>
+        - সার্চ বারে নাম, ফোন বা রক্তের গ্রুপ লিখুন<br>
+        - ফিল্টার ব্যবহার করে আজ উপযুক্ত বা শীঘ্রই উপযুক্ত ডোনার খুঁজুন<br><br>
+        
+        <strong>৩. রক্তদান আপডেট:</strong><br>
+        - ডোনার প্রোফাইলে গিয়ে "নতুন রক্তদান যোগ করুন" বাটনে ক্লিক করুন<br>
+        - সর্বশেষ রক্তদানের তারিখ ইনপুট করুন<br><br>
+        
+        <strong>৪. ডেটা ম্যানেজমেন্ট:</strong><br>
+        - সেটিংস থেকে ডেটা এক্সপোর্ট/ইম্পোর্ট করতে পারবেন<br>
+        - ক্লাউডে ডেটা সিঙ্ক করতে "সিঙ্ক করুন" বাটন ব্যবহার করুন
+    `;
+    
+    showAlert("info", helpMessage, "সাহায্য কেন্দ্র");
+}
+
+// মোডাল বন্ধ করুন
+function closeAllModals() {
+    document.querySelectorAll('.modal').forEach(modal => {
+        modal.style.display = 'none';
+    });
+}
+
+// লোডিং স্টেট দেখান
+function showLoading() {
+    // ইমপ্লিমেন্ট লোডিং স্টেট
+    console.log("Loading...");
+}
+
+function hideLoading() {
+    // লোডিং স্টেট লুকান
+    console.log("Loading complete");
+}
+
+// এলার্ট দেখান
+function showAlert(type, message, title = "") {
+    let icon, color;
+    
+    switch (type) {
+        case "success":
+            icon = "fas fa-check-circle";
+            color = "#2ecc71";
+            break;
+        case "error":
+            icon = "fas fa-times-circle";
+            color = "#e74c3c";
+            break;
+        case "warning":
+            icon = "fas fa-exclamation-triangle";
+            color = "#f39c12";
+            break;
+        default:
+            icon = "fas fa-info-circle";
+            color = "#3498db";
+    }
+    
+    const alertBox = document.createElement('div');
+    alertBox.className = 'custom-alert';
+    alertBox.style.backgroundColor = `${color}20`;
+    alertBox.style.borderLeft = `4px solid ${color}`;
+    
+    if (title) {
+        alertBox.innerHTML = `
+            <div class="alert-header">
+                <i class="${icon}" style="color: ${color}"></i>
+                <h3>${title}</h3>
+            </div>
+            <div class="alert-message">${message}</div>
+        `;
+    } else {
+        alertBox.innerHTML = `
+            <div class="alert-content">
+                <i class="${icon}" style="color: ${color}"></i>
+                <div class="alert-message">${message}</div>
+            </div>
+        `;
+    }
+    
+    document.body.appendChild(alertBox);
+    
+    setTimeout(() => {
+        alertBox.classList.add('show');
+    }, 10);
+    
+    setTimeout(() => {
+        alertBox.classList.remove('show');
+        setTimeout(() => {
+            alertBox.remove();
+        }, 300);
+    }, 5000);
+}
+
+// তারিখ ফরম্যাট করুন
+function formatDate(date) {
+    if (!(date instanceof Date) || isNaN(date)) return 'N/A';
+    
+    const options = { 
+        year: 'numeric', 
+        month: 'short', 
+        day: 'numeric',
+        weekday: 'short'
+    };
+    
+    return date.toLocaleDateString('bn-BD', options);
+}
+
+// ডোনার মোডাল বন্ধ করুন
+function closeDonorModal() {
+    donorModalEl.style.display = 'none';
+    appState.currentDonor = null;
+}
